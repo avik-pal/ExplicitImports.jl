@@ -1,37 +1,59 @@
 module ExplicitImports
 
 using JuliaSyntax, AbstractTrees
+# suppress warning about Base.parse collision, even though parse is never used
+# this avoids a warning when loading the package while creating an unused explicit import
+# the former occurs for all users, the latter only for developers of this package
+using JuliaSyntax: parse
 using AbstractTrees: parent
+using TOML: parsefile
+using Compat: Compat, @compat
+using Markdown: Markdown
+using PrecompileTools: @setup_workload, @compile_workload
 
 export print_explicit_imports, explicit_imports, check_no_implicit_imports,
        explicit_imports_nonrecursive
+export print_explicit_imports_script
+export improper_qualified_accesses,
+       improper_qualified_accesses_nonrecursive, check_all_qualified_accesses_via_owners,
+       check_all_qualified_accesses_are_public,
+       check_no_self_qualified_accesses
+export improper_explicit_imports, improper_explicit_imports_nonrecursive,
+       check_all_explicit_imports_via_owners, check_all_explicit_imports_are_public
+export ImplicitImportsException, UnanalyzableModuleException,
+       FileNotFoundException, QualifiedAccessesFromNonOwnerException,
+       ExplicitImportsFromNonOwnerException, NonPublicExplicitImportsException,
+       NonPublicQualifiedAccessException, SelfQualifiedAccessException
+export StaleImportsException, check_no_stale_explicit_imports
+
+# deprecated
 export print_stale_explicit_imports, stale_explicit_imports,
-       check_no_stale_explicit_imports, stale_explicit_imports_nonrecursive
-export StaleImportsException, ImplicitImportsException, UnanalyzableModuleException,
-       FileNotFoundException
+       stale_explicit_imports_nonrecursive,
+       print_improper_qualified_accesses
+
+const SKIPS_KWARG = """
+* `skip=(mod, Base, Core)`: any names coming from the listed modules (or any submodules thereof) will be skipped. Since `mod` is included by default, implicit imports of names exported from its own submodules will not count by default.
+"""
+
+const STRICT_KWARG = """
+* `strict=true`: when `strict` is set, results for a module will be `nothing` in the case that the analysis could not be performed accurately, due to e.g. dynamic `include` statements. When `strict=false`, results are returned in all cases, but may be inaccurate."""
+
+const STRICT_PRINTING_KWARG = """
+* `strict=true`: when `strict` is set, a module will be noted as unanalyzable in the case that the analysis could not be performed accurately, due to e.g. dynamic `include` statements. When `strict=false`, results are returned in all cases, but may be inaccurate.
+"""
+
+const STRICT_NONRECURSIVE_KWARG = """
+* `strict=true`: when `strict=true`, results will be `nothing` in the case that the analysis could not be performed accurately, due to e.g. dynamic `include` statements. When `strict=false`, results are returned in all cases, but may be inaccurate."""
 
 include("parse_utilities.jl")
 include("find_implicit_imports.jl")
 include("get_names_used.jl")
+include("improper_qualified_accesses.jl")
+include("improper_explicit_imports.jl")
+include("interactive_usage.jl")
 include("checks.jl")
-
-const SKIPS_KWARG = """
-    * `skip=(mod, Base, Core)`: any names coming from the listed modules (or any submodules thereof) will be skipped. Since `mod` is included by default, implicit imports of names exported from its own submodules will not count by default.
-    """
-
-const STRICT_KWARG = """
-    * `strict=true`: when `strict` is set, results for a module will be `nothing` in the case that the analysis could not be performed accurately, due to e.g. dynamic `include` statements. When `strict=false`, results are returned in all cases, but may be inaccurate."""
-
-const STRICT_PRINTING_KWARG = """
-    * `strict=true`: when `strict` is set, a module will be noted as unanalyzable in the case that the analysis could not be performed accurately, due to e.g. dynamic `include` statements. When `strict=false`, results are returned in all cases, but may be inaccurate.
-    """
-
-const STRICT_NONRECURSIVE_KWARG = """
-    * `strict=true`: when `strict=true`, results will be `nothing` in the case that the analysis could not be performed accurately, due to e.g. dynamic `include` statements. When `strict=false`, results are returned in all cases, but may be inaccurate."""
-
-const WARN_STALE_KWARG = """
-    * `warn_stale=true`: whether or not to warn about stale explicit imports.
-    """
+include("deprecated.jl")
+include("main.jl")
 
 struct FileNotFoundException <: Exception end
 
@@ -53,9 +75,9 @@ function check_file(file)
 end
 
 """
-    explicit_imports(mod::Module, file=pathof(mod); skip=(mod, Base, Core), warn_stale=true, strict=true)
+    explicit_imports(mod::Module, file=pathof(mod); skip=(mod, Base, Core), strict=true)
 
-Returns a nested structure providing information about explicit import statements one could make for each submodule of `mod`. This information is structured as a collection of pairs, where the keys are the submodules of `mod` (including `mod` itself), and the values are `NamedTuple`s, with at least the keys `name`, `source`, and `location`, showing which names are being used implicitly, which modules they came from, and the location of those usages. Additional keys may be added to the `NamedTuple`'s in the future in non-breaking releases of ExplicitImports.jl.
+Returns a nested structure providing information about explicit import statements one could make for each submodule of `mod`. This information is structured as a collection of pairs, where the keys are the submodules of `mod` (including `mod` itself), and the values are `NamedTuple`s, with at least the keys `name`, `source`, `exporters`, and `location`, showing which names are being used implicitly, which modules they were defined in, which modules they were exported from, and the location of those usages. Additional keys may be added to the `NamedTuple`'s in the future in non-breaking releases of ExplicitImports.jl.
 
 ## Arguments
 
@@ -67,92 +89,85 @@ Returns a nested structure providing information about explicit import statement
 ## Keyword arguments
 
 $SKIPS_KWARG
-$WARN_STALE_KWARG
 $STRICT_KWARG
+
+!!! note
+    If `mod` is a package, we can detect the explicit_imports in the package extensions if those extensions are explicitly loaded before calling this function.
+
+    For example, consider `PackageA` has a weak-dependency on `PackageB` and `PackageC` in the module `PkgBPkgCExt`
+
+    ```julia-repl
+    julia> using ExplicitImports, PackageA
+
+    julia> explicit_imports(PackageA) # Only checks for explicit imports in PackageA and its submodules but not in `PkgBPkgCExt`
+    ```
+
+    To check for explicit imports in `PkgBPkgCExt`, you can do the following:
+
+    ```julia-repl
+    julia> using ExplicitImports, PackageA, PackageB, PackageC
+
+    julia> explicit_imports(PackageA) # Now checks for explicit imports in PackageA and its submodules and also in `PkgBPkgCExt`
+    ```
 
 See also [`print_explicit_imports`](@ref) to easily compute and print these results, [`explicit_imports_nonrecursive`](@ref) for a non-recursive version which ignores submodules, and  [`check_no_implicit_imports`](@ref) for a version that throws errors, for regression testing.
 """
 function explicit_imports(mod::Module, file=pathof(mod); skip=(mod, Base, Core),
-                          warn_stale=true, strict=true,
+                          strict=true,
+                          # deprecated
+                          warn_stale=nothing,
                           # private undocumented kwarg for hoisting this analysis
-                          file_analysis=get_names_used(file))
+                          file_analysis=Dict())
     check_file(file)
-    submodules = find_submodules(mod)
-    return [submodule => explicit_imports_nonrecursive(submodule, file; skip, warn_stale,
-                                                       file_analysis, strict)
-            for submodule in submodules]
-end
-
-function print_explicit_imports(mod::Module, file=pathof(mod); kw...)
-    return print_explicit_imports(stdout, mod, file; kw...)
-end
-
-"""
-    print_explicit_imports([io::IO=stdout,] mod::Module, file=pathof(mod); skip=(mod, Base, Core), warn_stale=true, strict=true)
-
-Runs [`explicit_imports`](@ref) and prints the results, along with those of [`stale_explicit_imports`](@ref).
-
-## Keyword arguments
-
-$SKIPS_KWARG
-* `warn_stale=true`: if set, this function will also print information about stale explicit imports.
-$STRICT_PRINTING_KWARG
-* `show_locations=false`: whether or not to print locations of where the names are being used (and, if `warn_stale=true`, where the stale explicit imports are).
-
-See also [`check_no_implicit_imports`](@ref) and [`check_no_stale_explicit_imports`](@ref).
-"""
-function print_explicit_imports(io::IO, mod::Module, file=pathof(mod);
-                                skip=(mod, Base, Core), warn_stale=true, strict=true,
-                                show_locations=false)
-    file_analysis = get_names_used(file)
-    ee = explicit_imports(mod, file; warn_stale=false, skip, strict, file_analysis)
-    for (i, (mod, imports)) in enumerate(ee)
-        i == 1 || println(io)
-        if isnothing(imports)
-            println(io,
-                    "Module $mod could not be accurately analyzed, likely due to dynamic `include` statements. You can pass `strict=false` to attempt to get (possibly inaccurate) results anyway.")
-        elseif isempty(imports)
-            println(io, "Module $mod is not relying on any implicit imports.")
-        else
-            println(io,
-                    "Module $mod is relying on implicit imports for $(length(imports)) names. ",
-                    "These could be explicitly imported as follows:")
-            println(io)
-            println(io, "```julia")
-            for nt in imports
-                if show_locations
-                    proof = " # used at $(nt.location)"
-                else
-                    proof = ""
-                end
-                println(io, using_statement(nt), proof)
-            end
-            println(io, "```")
-        end
-        if warn_stale
-            stale = stale_explicit_imports_nonrecursive(mod, file; strict, file_analysis)
-            if !isnothing(stale) && !isempty(stale)
-                word = isempty(imports) ? "However" : "Additionally"
-                println(io)
-                println(io,
-                        "$word, $mod has stale explicit imports for these unused names:")
-                for (; name, location) in stale
-                    if show_locations
-                        proof = " (imported at $(location))"
-                    else
-                        proof = ""
-                    end
-                    println(io, "- $name", proof)
-                end
-            end
-        end
+    if warn_stale !== nothing
+        @warn "[explicit_imports] keyword argument `warn_stale` is deprecated and does nothing" _id = :explicit_imports_explicit_imports_warn_stale maxlog = 1
     end
+
+    submodules = find_submodules(mod, file)
+    fill_cache!(file_analysis, last.(submodules))
+    return [submodule => explicit_imports_nonrecursive(submodule, path; skip, warn_stale,
+                                                       file_analysis=file_analysis[path],
+                                                       strict)
+            for (submodule, path) in submodules]
 end
 
-function using_statement((; name, source))
-    # skip `Main.X`, just do `.X`
-    v = replace(string(source), "Main" => "")
-    return "using $v: $name"
+# TODO-someday; there may be a better way to make this choice
+function choose_exporter(name, exporters)
+    by = mod -> reverse(module_path(mod))
+    sorted = sort(exporters; by, lt=is_prefix)
+    return first(sorted)
+end
+
+function using_statements(io::IO, rows; linewidth=80, show_locations=false,
+                          separate_lines=false)
+    chosen = (choose_exporter(row.name, row.exporters) for row in rows)
+    prev_mod = nothing
+    cur_line_width = 0
+    indent = 0
+    first = true
+    for (mod, row) in zip(chosen, rows)
+        @compat (; name, location) = row
+        if show_locations || mod !== prev_mod || separate_lines
+            cur_line_width = 0
+            loc = show_locations ? " # used at $(location)" : ""
+            # skip `Main.X`, just do `.X`
+            v = replace(string(mod), "Main" => "")
+            use = "using $v: "
+            indent = textwidth(use)
+            prev_mod = mod
+            to_print = string(first ? "" : "\n", use, name, loc)
+        elseif cur_line_width + textwidth(", $name") >= linewidth
+            to_print = string(",\n", " "^indent, name)
+            cur_line_width = 0
+        else
+            to_print = string(", $name")
+        end
+        first = false
+        cur_line_width += textwidth(to_print)
+        print(io, to_print)
+    end
+    println(io)
+    return nothing
 end
 
 function is_prefix(x, y)
@@ -160,24 +175,27 @@ function is_prefix(x, y)
 end
 
 """
-    explicit_imports_nonrecursive(mod::Module, file=pathof(mod); skip=(mod, Base, Core), warn_stale=true, strict=true)
+    explicit_imports_nonrecursive(mod::Module, file=pathof(mod); skip=(mod, Base, Core), strict=true)
 
 A non-recursive version of [`explicit_imports`](@ref), meaning it only analyzes the module `mod` itself, not any of its submodules; see that function for details.
 
 ## Keyword arguments
 
 $SKIPS_KWARG
-$WARN_STALE_KWARG
 $STRICT_NONRECURSIVE_KWARG
 
 """
 function explicit_imports_nonrecursive(mod::Module, file=pathof(mod);
                                        skip=(mod, Base, Core),
-                                       warn_stale=true,
                                        strict=true,
+                                       # deprecated
+                                       warn_stale=nothing,
                                        # private undocumented kwarg for hoisting this analysis
                                        file_analysis=get_names_used(file))
     check_file(file)
+    if warn_stale !== nothing
+        @warn "[explicit_imports_nonrecursive] keyword argument `warn_stale` is deprecated and does nothing" _id = :explicit_imports_explicit_imports_warn_stale maxlog = 1
+    end
     all_implicit_imports = find_implicit_imports(mod; skip)
 
     needs_explicit_import, unnecessary_explicit_import, tainted = filter_to_module(file_analysis,
@@ -189,13 +207,13 @@ function explicit_imports_nonrecursive(mod::Module, file=pathof(mod);
     needed_names = Set(nt.name for nt in needs_explicit_import)
     filter!(all_implicit_imports) do (k, v)
         k in needed_names || return false
-        should_skip(v; skip) && return false
+        any(mod -> should_skip(mod; skip), v.exporters) && return false
         return true
     end
 
     location_lookup = Dict(nt.name => nt.location for nt in needs_explicit_import)
 
-    to_make_explicit = [(; name=k, source=v, location=location_lookup[k])
+    to_make_explicit = [(; name=k, v..., location=location_lookup[k])
                         for (k, v) in all_implicit_imports]
 
     function lt((k1, v1), (k2, v2))
@@ -217,111 +235,10 @@ function explicit_imports_nonrecursive(mod::Module, file=pathof(mod);
         return is_lt
     end
 
-    sort!(to_make_explicit; lt)
-
-    if warn_stale
-        unnecessary = unique!(sort!([nt.name for nt in unnecessary_explicit_import]))
-        if !isempty(unnecessary)
-            @warn "Found stale explicit imports in $mod for these names: $unnecessary. To get this list programmatically, call `stale_explicit_imports`. To silence this warning, pass `warn_stale=false`."
-        end
-    end
+    by = nt -> (nt.name, choose_exporter(nt.name, nt.exporters))
+    sort!(to_make_explicit; by, lt)
 
     return to_make_explicit
-end
-
-"""
-    print_stale_explicit_imports([io::IO=stdout,] mod::Module, file=pathof(mod); strict=true, show_locations=false)
-
-Runs [`stale_explicit_imports`](@ref) and prints the results.
-
-## Keyword arguments
-
-$STRICT_PRINTING_KWARG
-* `show_locations=false`: whether or not to print where the explicit imports were made. If the same name was explicitly imported more than once, it will only show one such import.
-
-See also [`print_explicit_imports`](@ref) and [`check_no_stale_explicit_imports`](@ref).
-"""
-print_stale_explicit_imports
-
-function print_stale_explicit_imports(mod::Module, file=pathof(mod); kw...)
-    return print_stale_explicit_imports(stdout, mod, file; kw...)
-end
-function print_stale_explicit_imports(io::IO, mod::Module, file=pathof(mod); strict=true,
-                                      show_locations=false)
-    check_file(file)
-    for (i, (mod, stale_imports)) in enumerate(stale_explicit_imports(mod, file; strict))
-        i == 1 || println(io)
-        if isnothing(stale_imports)
-            println(io,
-                    "Module $mod could not be accurately analyzed, likely due to dynamic `include` statements. You can pass `strict=false` to attempt to get (possibly inaccurate) results anyway.")
-        elseif isempty(stale_imports)
-            println(io, "Module $mod has no stale explicit imports.")
-        else
-            println(io,
-                    "Module $mod has stale explicit imports for these unused names:")
-            for (; name, location) in stale_imports
-                if show_locations
-                    proof = " (imported at $(location))"
-                else
-                    proof = ""
-                end
-                println(io, "- $name", proof)
-            end
-        end
-    end
-end
-
-"""
-    stale_explicit_imports(mod::Module, file=pathof(mod); strict=true)
-
-Returns a collection of pairs, where the keys are submodules of `mod` (including `mod` itself), and the values are either `nothing` if `strict=true` and the module couldn't analyzed, or else a vector of `NamedTuple`s with at least the keys `name` and `location`, consisting of names that are explicitly imported in that submodule, but which either are not used, or are only used in a qualified fashion, making the explicit import a priori unnecessary.
-
-More keys may be added to the NamedTuples in the future in non-breaking releases of ExplicitImports.jl.
-
-!!! warning
-    Note that it is possible for an import from a module (say `X`) into one module (say `A`) to be relied on from another unrelated module (say `B`). For example, if `A` contains the code `using X: x`, but either does not use `x` at all or only uses `x` in the form `X.x`, then `x` will be flagged as a stale explicit import by this function. However, it could be that the code in some unrelated module `B` uses `A.x` or `using A: x`, relying on the fact that `x` has been imported into `A`'s namespace.
-
-    This is an unusual situation (generally `B` should just get `x` directly from `X`, rather than indirectly via `A`), but there are situations in which it arises, so one may need to be careful about naively removing all "stale" explicit imports flagged by this function.
-
-## Keyword arguments
-
-$STRICT_KWARG
-
-See [`stale_explicit_imports_nonrecursive`](@ref) for a non-recursive version, and [`check_no_stale_explicit_imports`](@ref) for a version that throws an error when encountering stale explicit imports.
-
-See also [`print_explicit_imports`](@ref) which prints this information.
-"""
-function stale_explicit_imports(mod::Module, file=pathof(mod); strict=true)
-    check_file(file)
-    submodules = find_submodules(mod)
-    file_analysis = get_names_used(file) # only do this once
-    return [submodule => stale_explicit_imports_nonrecursive(submodule, file; file_analysis,
-                                                             strict)
-            for submodule in submodules]
-end
-
-"""
-    stale_explicit_imports_nonrecursive(mod::Module, file=pathof(mod); strict=true)
-
-A non-recursive version of [`stale_explicit_imports`](@ref), meaning it only analyzes the module `mod` itself, not any of its submodules.
-
-If `mod` was unanalyzable and `strict=true`, returns `nothing`. Otherwise, returns a collection of `NamedTuple`'s, with at least the keys `name` and `location`, corresponding to the names of stale explicit imports. More keys may be added in the future in non-breaking releases of ExplicitImports.jl.
-
-## Keyword arguments
-
-$STRICT_NONRECURSIVE_KWARG
-
-See also [`print_explicit_imports`](@ref) and [`check_no_stale_explicit_imports`](@ref), both of which do recurse through submodules.
-"""
-function stale_explicit_imports_nonrecursive(mod::Module, file=pathof(mod);
-                                             strict=true,
-                                             # private undocumented kwarg for hoisting this analysis
-                                             file_analysis=get_names_used(file))
-    check_file(file)
-    (; unnecessary_explicit_import, tainted) = filter_to_module(file_analysis, mod)
-    tainted && strict && return nothing
-    ret = [(; nt.name, nt.location) for nt in unnecessary_explicit_import]
-    return unique!(nt -> nt.name, sort!(ret))
 end
 
 function has_ancestor(query, target)
@@ -345,7 +262,7 @@ function module_path(mod)
     path = Symbol[nameof(mod)]
     while true
         next = parentmodule(mod)
-        (next == mod || nameof(next) == :Main) && return path
+        (next == mod || nameof(mod) == :Main) && return path
         push!(path, nameof(next))
         mod = next
     end
@@ -360,17 +277,30 @@ function filter_to_module(file_analysis::FileAnalysis, mod::Module)
     # Therefore, we use `zip` for its early termination, to just match the module paths
     # to the extent they agree (starting at the earliest point).
     # This means we cannot distinguish X.Y.X from X in some cases.
-    # Don't do that!
     match = module_path -> all(Base.splat(isequal), zip(module_path, mod_path))
 
+    per_usage_info = filter(file_analysis.per_usage_info) do nt
+        return match(nt.module_path)
+    end
     needs_explicit_import = filter(file_analysis.needs_explicit_import) do nt
         return match(nt.module_path)
     end
     unnecessary_explicit_import = filter(file_analysis.unnecessary_explicit_import) do nt
         return match(nt.module_path)
     end
-    tainted = !any(match, file_analysis.untainted_modules)
-    return (; needs_explicit_import, unnecessary_explicit_import, tainted)
+    mods_found = filter(!isempty, file_analysis.untainted_modules)
+    tainted = !any(match, mods_found)
+    return (; needs_explicit_import, unnecessary_explicit_import, tainted, per_usage_info)
+end
+
+if VERSION < v"1.9-"
+    getglobal(mod, name) = getfield(mod, name)
+end
+
+# https://github.com/JuliaLang/julia/issues/53574
+function _parentmodule(mod)
+    mod === Base && return Base
+    return parentmodule(mod)
 end
 
 # recurse through to find all submodules of `mod`
@@ -380,9 +310,13 @@ function _find_submodules(mod)
         name == nameof(mod) && continue
         is_submodule = try
             value = getglobal(mod, name)
-            value isa Module && parentmodule(value) == mod
-        catch
-            false
+            value isa Module && _parentmodule(value) == mod
+        catch e
+            if e isa UndefVarError
+                false
+            else
+                rethrow()
+            end
         end
         if is_submodule
             submod = getglobal(mod, name)
@@ -391,12 +325,55 @@ function _find_submodules(mod)
             end
         end
     end
+    # pre-1.9, there are not package extensions
+    VERSION < v"1.9-" && return sub_modules
+
+    # Add extensions to the set of submodules if present
+    project_file = get_project_file(mod)
+    project_file === nothing && return sub_modules
+    project_toml = parsefile(project_file)
+    if haskey(project_toml, "extensions")
+        extensions = project_toml["extensions"]
+        for ext in keys(extensions)
+            ext_mod = Base.get_extension(mod, Symbol(ext))
+            ext_mod === nothing && continue
+            if ext_mod ∉ sub_modules
+                union!(sub_modules, _find_submodules(ext_mod))
+            end
+        end
+    end
     return sub_modules
 end
 
-function find_submodules(mod::Module)
-    return sort!(collect(_find_submodules(mod)); by=reverse ∘ module_path,
-                 lt=is_prefix)
+function get_project_file(mod)
+    pkgdir(mod) === nothing && return nothing
+    for filename in ("Project.toml", "JuliaProject.toml")
+        pfile = joinpath(pkgdir(mod), filename)
+        isfile(pfile) && return pfile
+    end
+    return nothing
+end
+
+function find_submodules(mod::Module, file=pathof(mod))
+    submodules = sort!(collect(_find_submodules(mod)); by=reverse ∘ module_path,
+                       lt=is_prefix)
+    paths = find_submodule_path.((file,), submodules)
+    return [submod => path for (submod, path) in zip(submodules, paths)]
+end
+
+function find_submodule_path(file, submodule)
+    path = pathof(submodule)
+    path === nothing && return file
+    return path
+end
+
+function fill_cache!(file_analysis::Dict, files)
+    for _file in files
+        if !haskey(file_analysis, _file)
+            file_analysis[_file] = get_names_used(_file)
+        end
+    end
+    return file_analysis
 end
 
 inspect_session(; kw...) = inspect_session(stdout; kw...)
@@ -413,6 +390,12 @@ function inspect_session(io::IO; skip=(Base, Core), inner=print_explicit_imports
         isfile(pathof(mod)) || continue
         inner(io, mod)
         println(io)
+    end
+end
+
+@setup_workload begin
+    @compile_workload begin
+        sprint(print_explicit_imports, ExplicitImports, @__FILE__)
     end
 end
 

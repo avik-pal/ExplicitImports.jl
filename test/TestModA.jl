@@ -16,6 +16,8 @@ g() = exported_a()
 
 g2() = un_exported()
 
+@mac
+
 x = 1
 
 function func()
@@ -50,6 +52,8 @@ export h2
 h() = (local8 = 1; f())
 
 h2() = exported_b()
+
+h3() = 1
 
 module TestModA # again
 

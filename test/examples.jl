@@ -1,3 +1,4 @@
+# https://github.com/ericphanson/ExplicitImports.jl/issues/1
 module ThreadPinning
 
 using LinearAlgebra
@@ -18,4 +19,57 @@ function pinthreads_mpi(::Val{:numa}, rank::Integer, nranks::Integer;
     return nothing
 end
 
+end
+
+# https://github.com/ericphanson/ExplicitImports.jl/issues/20
+module Foo20
+
+using Markdown
+
+@doc doc"""
+testing docs
+"""
+function testing_docstr end
+
+end
+
+module Bar20
+
+using Markdown: @doc_str
+
+@doc doc"""
+testing docs
+"""
+function testing_docstr end
+
+end
+
+# https://github.com/ericphanson/ExplicitImports.jl/issues/24
+module Mod24
+using ..Exporter2
+
+exported_a
+end
+
+# https://github.com/ericphanson/ExplicitImports.jl/issues/29
+module Mod29
+using UUIDs
+
+v = UUID[]
+end
+
+module ModWithTryparse
+using Main: @public
+
+@public tryparse
+function tryparse()
+    return 1
+end
+end
+# https://github.com/ericphanson/ExplicitImports.jl/issues/88
+module Mod88
+
+using ..ModWithTryparse
+
+tryparse
 end

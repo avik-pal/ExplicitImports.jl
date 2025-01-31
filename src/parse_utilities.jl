@@ -61,12 +61,15 @@ function AbstractTrees.children(wrapper::SyntaxNodeWrapper)
                 end
                 if JuliaSyntax.kind(arg) == K"string"
                     children = JuliaSyntax.children(arg)
-                    # string literals can only have one child (I think...)
+                    # if we have interpolation, there may be >1 child
+                    length(children) == 1 || @goto dynamic
                     c = only(children)
+                    # if we have interpolation, this might not be a string
+                    kind(c) == K"String" || @goto dynamic
                     # The children of a static include statement is the entire file being included
                     new_file = joinpath(dirname(wrapper.file), c.val)
                     if isfile(new_file)
-                        @debug "Recursing into `$new_file`" node wrapper.file
+                        # @debug "Recursing into `$new_file`" node wrapper.file
                         new_wrapper = try_parse_wrapper(new_file; wrapper.bad_locations)
                         if new_wrapper === nothing
                             push!(wrapper.bad_locations, location)
@@ -80,6 +83,7 @@ function AbstractTrees.children(wrapper::SyntaxNodeWrapper)
                         return [SkippedFile(location)]
                     end
                 else
+                    @label dynamic
                     @warn "Dynamic `include` found at $location; not recursing"
                     push!(wrapper.bad_locations, location)
                     return [SkippedFile(location)]
@@ -120,13 +124,7 @@ function child_index(n::TreeCursor)
     return index
 end
 
-struct Or{T<:Tuple}
-    args::T
-end
-Or(args...) = Or(args)
-
 kind_match(k1::JuliaSyntax.Kind, k2::JuliaSyntax.Kind) = k1 == k2
-kind_match(k1::JuliaSyntax.Kind, or::Or) = any(k2 -> kind_match(k1, k2), or.args)
 
 parents_match(n::TreeCursor, kinds::Tuple{}) = true
 function parents_match(n::TreeCursor, kinds::Tuple)
@@ -143,4 +141,12 @@ function get_parent(n, i=1)
         n === nothing && error("No parent")
     end
     return n
+end
+
+function has_parent(n, i=1)
+    for _ in i:-1:1
+        n = parent(n)
+        n === nothing && return false
+    end
+    return true
 end
